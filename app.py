@@ -1,8 +1,11 @@
 import threading
 
 import cv2
-from PyQt6.QtWidgets import QMainWindow, QLabel, QGridLayout, QPushButton, QApplication, QWidget
+from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtWidgets import QMainWindow, QLabel, QGridLayout, QPushButton, QApplication, QWidget, QDialog, QVBoxLayout, \
+    QDialogButtonBox
 from gaze_tracking import GazeTracking
+from time import time
 
 class EyeBoundary:
     def __init__(self):
@@ -35,8 +38,12 @@ class EyeBoundary:
 
 
 class MainWindow(QMainWindow):
+    show_dialog_signal = pyqtSignal()
+
     def __init__(self):
         super().__init__()
+
+        self.show_dialog_signal.connect(self.callDialogBox)
 
         self.gaze = GazeTracking()
         self.webcam = None
@@ -45,22 +52,45 @@ class MainWindow(QMainWindow):
 
         layout1 = QGridLayout()
 
-        self.label = QLabel("Press the Start button whenever you're ready")
-        layout1.addWidget(self.label, 0, 0)
+        self.label1 = QLabel("Press the Start button whenever you're ready")
+        layout1.addWidget(self.label1, 0, 0)
 
-        self.dataLabel1 = QLabel()
-        layout1.addWidget(self.dataLabel1, 1, 0)
-
-        self.dataLabel2 = QLabel()
-        layout1.addWidget(self.dataLabel2, 2, 0)
+        self.label2 = QLabel()
+        layout1.addWidget(self.label2, 1, 0)
 
         self.button = QPushButton("Start")
         self.button.clicked.connect(self.press)
-        layout1.addWidget(self.button, 2, 1)
+        layout1.addWidget(self.button, 4, 1)
 
         widget = QWidget()
         widget.setLayout(layout1)
         self.setCentralWidget(widget)
+
+    def callDialogBox(self):
+        dlg = QDialog()
+        def pressOkButton():
+            self.state = 2
+            self.press()
+            dlg.accept()
+
+        def pressRecalibrateButton():
+            self.press()
+            dlg.reject()
+
+        dlgLayout = QVBoxLayout()
+
+        dlgLabel = QLabel("You have not been focusing for a while")
+        dlgLayout.addWidget(dlgLabel)
+
+        dlgButtonBox = QDialogButtonBox()
+        dlgButtonBox.addButton(QPushButton("Recalibrate"), QDialogButtonBox.ButtonRole.RejectRole)
+        dlgButtonBox.addButton(QDialogButtonBox.StandardButton.Ok)
+        dlgButtonBox.accepted.connect(pressOkButton)
+        dlgButtonBox.rejected.connect(pressRecalibrateButton)
+        dlgLayout.addWidget(dlgButtonBox)
+
+        dlg.setLayout(dlgLayout)
+        dlg.exec()
 
     def press(self):
         match self.state:
@@ -69,12 +99,12 @@ class MainWindow(QMainWindow):
                 self.webcam = cv2.VideoCapture(0)
                 thread = threading.Thread(target=self.thread, args = ())
                 thread.start()
-                self.label.setText("Look at the top, bottom, left and right of the screen, then press Continue")
+                self.label1.setText("Look at the top, bottom, left and right of the screen, then press Continue")
                 self.button.setText("Continue")
 
             case 1:
                 self.state = 2
-                self.label.setText("Detection in progress")
+                self.label1.setText("Detection in progress")
                 self.button.setText("Stop")
 
             case 2:
@@ -84,40 +114,53 @@ class MainWindow(QMainWindow):
     def thread(self):
         eyeLeft_boundary = EyeBoundary()
         eyeRight_boundary = EyeBoundary()
-        while self.state > 0:
+        timerStarted = False
+        startTime = None
+        focusedCount = 0
+        notFocusedCount = 0
+        while self.state:
             _, frame = self.webcam.read()
             self.gaze.refresh(frame)
 
             new_frame = self.gaze.annotated_frame()
-            self.dataLabel1.setText(str(self.gaze.pupil_left_coords()))
-            self.dataLabel2.setText(str(self.gaze.pupil_right_coords()))
 
-            if self.gaze.pupils_located:
-                left_x, left_y = self.gaze.pupil_left_coords()
-                right_x, right_y = self.gaze.pupil_right_coords()
+            if self.state == 1:
+                if self.gaze.pupils_located:
+                    self.label2.clear()
+                    left_x, left_y = self.gaze.pupil_left_coords()
+                    right_x, right_y = self.gaze.pupil_right_coords()
 
-                if self.state == 1:
                     eyeLeft_boundary.adjust_coords((int(left_x), int(left_y)))
                     eyeRight_boundary.adjust_coords((int(right_x), int(right_y)))
 
                 else:
-                    if (eyeLeft_boundary.check_coords((int(left_x), int(left_y)))
-                          and eyeRight_boundary.check_coords((int(right_x), int(right_y)))):
-                        self.label.setText("Not focusing")
-                    else:
-                        self.label.setText("Focusing")
+                    self.label2.setText("Warning: Pupil not detected")
 
             else:
-                if self.state == 2:
-                    self.label.setText("Pupils not found")
+                if not timerStarted:
+                    startTime = time()
+                    timerStarted = True
+                if time() - startTime > 10:
+                    timerStarted = False
+                    if notFocusedCount > 2 * focusedCount:
+                        self.show_dialog_signal.emit()
+                        self.state = 0
+
+                        self.label2.setText("Caution: You have not been focusing for a while")
+                if self.gaze.pupils_located:
+                    left_x, left_y = self.gaze.pupil_left_coords()
+                    right_x, right_y = self.gaze.pupil_right_coords()
+
+                    if (eyeLeft_boundary.check_coords((int(left_x), int(left_y)))
+                          and eyeRight_boundary.check_coords((int(right_x), int(right_y)))):
+                        self.label1.setText("Not focusing")
+                        notFocusedCount += 1
+                    else:
+                        self.label1.setText("Focusing")
+                        focusedCount += 1
 
         self.webcam.release()
-        self.label.setText("Press the Start button whenever you're ready")
-
-        print(eyeLeft_boundary.min_x, eyeRight_boundary.max_x, eyeLeft_boundary.min_y, eyeRight_boundary.max_y)
-        print(eyeRight_boundary.min_x, eyeRight_boundary.max_x, eyeRight_boundary.min_y, eyeRight_boundary.max_y)
-
-
+        self.label1.setText("Press the Start button whenever you're ready")
 
 app = QApplication([])
 window = MainWindow()
