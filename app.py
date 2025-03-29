@@ -5,7 +5,7 @@ from PyQt6.QtCore import pyqtSignal, QTime, Qt
 from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import (
     QMainWindow, QLabel, QGridLayout, QPushButton, QApplication, QWidget,
-    QDialog, QVBoxLayout, QDialogButtonBox, QTimeEdit, QWidget
+    QDialog, QVBoxLayout, QDialogButtonBox, QTimeEdit
 )
 from gaze_tracking import GazeTracking
 
@@ -31,31 +31,37 @@ class EyeBoundary:
 
 class FocusBar(QWidget):
     """
-    A custom widget that draws a horizontal bar with two colors.
-    Green represents the portion of time the user was focusing,
-    and red represents the portion of time not focusing.
+    Custom widget that draws a horizontal time bar. Each segment is either:
+         - Green if focusing, or
+         - Red if not focusing
     """
-    def __init__(self, focus_percentage=0, parent=None):
+    def __init__(self, timeline=None, parent=None):
         super().__init__(parent)
-        self.focus_percentage = focus_percentage
+        self.timeline = timeline if timeline is not None else []
 
-    def setFocusPercentage(self, focus_percentage):
-        self.focus_percentage = focus_percentage
+    def setTimeline(self, timeline):
+        self.timeline = timeline
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         rect = self.rect()
-        # Calculate width for the focusing portion.
-        focus_width = int(rect.width() * self.focus_percentage / 100)
-        # Draw the focusing (green) and not-focusing (red) portions.
-        painter.fillRect(0, 0, focus_width, rect.height(), Qt.GlobalColor.green)
-        painter.fillRect(focus_width, 0, rect.width() - focus_width, rect.height(), Qt.GlobalColor.red)
+        n = len(self.timeline)
+        if n == 0:
+            # If no samples, fill with a neutral color (light grey).
+            painter.fillRect(rect, Qt.GlobalColor.lightGray)
+            return
+
+        sample_width = rect.width() / n
+        for i, sample in enumerate(self.timeline):
+            x = int(i * sample_width)
+            color = Qt.GlobalColor.green if sample else Qt.GlobalColor.red
+            painter.fillRect(x, 0, int(sample_width), rect.height(), color)
 
 
 class MainWindow(QMainWindow):
-    # Signal now carries both the stats text and the focus percentage (float)
-    show_stats_signal = pyqtSignal(str, float)
+    # This signal carries the stats text and the timeline list
+    show_stats_signal = pyqtSignal(str, list)
 
     def __init__(self):
         super().__init__()
@@ -69,7 +75,7 @@ class MainWindow(QMainWindow):
         self.study_time = QTime()
         layout1 = QGridLayout()
 
-        self.label1 = QLabel("Select a study mode")
+        self.label1 = QLabel("How long are you studying for?")
         layout1.addWidget(self.label1, 0, 0)
 
         self.timer_edit = QTimeEdit()
@@ -91,17 +97,18 @@ class MainWindow(QMainWindow):
     def timeChanged(self, time: QTime):
         self.study_time = time
 
-    def callStatsDialog(self, stats: str, focus_percentage: float):
+    def callStatsDialog(self, stats: str, timeline: list):
         dlg = QDialog(self)
         dlg.setWindowTitle("Session Statistics")
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         dlgLayout = QVBoxLayout()
 
-        # Display textual statistics.
+        # Display statistics in label
         dlgLabel = QLabel(stats)
         dlgLayout.addWidget(dlgLabel)
 
-        # Create and add the custom focus bar.
-        focus_bar = FocusBar(focus_percentage)
+        # Create and add the custom timeline focus bar
+        focus_bar = FocusBar(timeline)
         focus_bar.setMinimumHeight(30)
         dlgLayout.addWidget(focus_bar)
 
@@ -109,15 +116,13 @@ class MainWindow(QMainWindow):
         dlgButtonBox.accepted.connect(dlg.accept)
         dlgLayout.addWidget(dlgButtonBox)
 
-        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-
-
         dlg.setLayout(dlgLayout)
         dlg.exec()
 
     def press(self):
         match self.state:
             case 0:
+                # Start calibration phase
                 self.state = 1
                 self.timer_edit.hide()  # Hide time selection when starting
                 self.webcam = cv2.VideoCapture(0)
@@ -126,10 +131,12 @@ class MainWindow(QMainWindow):
                 self.label1.setText("Look at the top, bottom, left and right of the screen, then press Continue")
                 self.button.setText("Continue")
             case 1:
+                # Calibration complete, start study session
                 self.state = 2
                 self.label1.setText("Session in progress...")
                 self.button.setText("Stop")
             case 2:
+                # User pressed Stop manually
                 self.state = 0
                 self.timer_edit.show()  # Show time selection when ending
                 self.button.setText("Start")
@@ -139,8 +146,9 @@ class MainWindow(QMainWindow):
         eyeRight_boundary = EyeBoundary()
         timerStarted = False
         startTime = None
-        focusedCount = 0
-        notFocusedCount = 0
+        sample_interval = 1  # seconds
+        last_sample_time = None
+        timeline = []  # list of booleans; True = focusing, False = not
 
         while self.state:
             ret, frame = self.webcam.read()
@@ -150,7 +158,7 @@ class MainWindow(QMainWindow):
             self.gaze.refresh(frame)
 
             if self.state == 1:
-                # Calibration phase.
+                # Calibration phase
                 if self.gaze.pupils_located:
                     self.label2.clear()
                     left_x, left_y = self.gaze.pupil_left_coords()
@@ -160,42 +168,58 @@ class MainWindow(QMainWindow):
                 else:
                     self.label2.setText("Warning: Pupil not detected")
             else:
-                # Session phase.
+                # Session phase (state = 2)
                 if not timerStarted:
                     startTime = time()
+                    last_sample_time = startTime
                     timerStarted = True
                 elapsed = time() - startTime
-                secs = QTime(0, 0).secsTo(self.study_time)
+                total_secs = QTime(0, 0).secsTo(self.study_time)
 
-                if elapsed > secs:
-                    self.show_statistics(focusedCount, notFocusedCount, secs)
+                # Sample the current focus state every sample_interval seconds
+                current_time = time()
+                if current_time - last_sample_time >= sample_interval:
+                    # Determine focus state based on current pupil coordinates
+                    if self.gaze.pupils_located:
+                        # If both pupils are outside the calibrated boundaries, assume not focusing
+                        if (eyeLeft_boundary.check_coords((int(self.gaze.pupil_left_coords()[0]), int(self.gaze.pupil_left_coords()[1]))) and
+                            eyeRight_boundary.check_coords((int(self.gaze.pupil_right_coords()[0]), int(self.gaze.pupil_right_coords()[1])))):
+                            sample = False
+                        else:
+                            sample = True
+                    else:
+                        sample = False
+                    timeline.append(sample)
+                    last_sample_time = current_time
+
+                # Update focus label (using the most recent sample)
+                if self.gaze.pupils_located:
+                    if (eyeLeft_boundary.check_coords((int(self.gaze.pupil_left_coords()[0]), int(self.gaze.pupil_left_coords()[1]))) and
+                        eyeRight_boundary.check_coords((int(self.gaze.pupil_right_coords()[0]), int(self.gaze.pupil_right_coords()[1])))):
+                        self.label1.setText("Not focusing")
+                    else:
+                        self.label1.setText("Focusing")
+
+                if elapsed > total_secs:
+                    self.show_statistics(timeline, total_secs)
                     self.state = 0
                     break
 
-                if self.gaze.pupils_located:
-                    left_x, left_y = self.gaze.pupil_left_coords()
-                    right_x, right_y = self.gaze.pupil_right_coords()
-
-                    if (eyeLeft_boundary.check_coords((int(left_x), int(left_y))) and
-                        eyeRight_boundary.check_coords((int(right_x), int(right_y)))):
-                        self.label1.setText("Not focusing")
-                        notFocusedCount += 1
-                    else:
-                        self.label1.setText("Focusing")
-                        focusedCount += 1
-
         self.webcam.release()
         self.label1.setText("Press the Start button whenever you're ready")
-        self.timer_edit.show()  # Ensure time selection is visible when session ends
 
-        # Show statistics if the session was stopped manually.
+        # If the session was stopped manually, show statistics
         if self.state == 0 and timerStarted:
             elapsed_secs = int(time() - startTime)
-            self.show_statistics(focusedCount, notFocusedCount, elapsed_secs)
+            self.show_statistics(timeline, elapsed_secs)
 
-    def show_statistics(self, focusedCount, notFocusedCount, elapsed_secs):
-        total_frames = focusedCount + notFocusedCount
-        focus_percentage = (focusedCount / total_frames * 100) if total_frames > 0 else 0
+    def show_statistics(self, timeline, elapsed_secs):
+        total_samples = len(timeline)
+        if total_samples > 0:
+            focus_count = sum(1 for sample in timeline if sample)
+            focus_percentage = (focus_count / total_samples) * 100
+        else:
+            focus_percentage = 0
         minutes_elapsed = elapsed_secs // 60
 
         stats = (
@@ -204,9 +228,9 @@ class MainWindow(QMainWindow):
             f"Focus Percentage: {focus_percentage:.2f}%"
         )
 
-        self.show_stats_signal.emit(stats, focus_percentage)
+        self.show_stats_signal.emit(stats, timeline)
         self.state = 0  # Reset session state
-        self.timer_edit.show()  # Ensure time selection is visible
+        self.timer_edit.show()
 
 
 if __name__ == '__main__':
