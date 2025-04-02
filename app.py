@@ -38,16 +38,26 @@ def init_db():
     conn.close()
 
 def save_session(start_time, end_time, focus_percentage, timeline):
-    """Saves session to db"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    focus_data_json = json.dumps(timeline)
-    cursor.execute('''
-        INSERT INTO sessions (start_time, end_time, focus_percentage, focus_data)
-        VALUES (?, ?, ?, ?)
-    ''', (int(start_time), int(end_time), focus_percentage, focus_data_json))
-    conn.commit()
-    conn.close()
+    """Saves session to db with error handling"""
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        focus_data_json = json.dumps(timeline)
+        cursor.execute('''
+            INSERT INTO sessions (start_time, end_time, focus_percentage, focus_data)
+            VALUES (?, ?, ?, ?)
+        ''', (int(start_time), int(end_time), focus_percentage, focus_data_json))
+        conn.commit()
+        print(f"Successfully saved session starting at {start_time}")
+    except sqlite3.Error as e:
+        print(f"Database Error in save_session: {e}")
+    except Exception as e:
+        print(f"Unexpected Error in save_session: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 def load_sessions():
     """Loads sessions from db"""
@@ -71,14 +81,23 @@ def load_sessions():
 
 def delete_session(session_id):
     """Deletes specific session"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        DELETE FROM sessions WHERE session_id = ?
-    ''', (session_id,))
-    conn.commit()
-    conn.close()
-    print(f"Deleted session with ID: {session_id}")
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('''
+            DELETE FROM sessions WHERE session_id = ?
+        ''', (session_id,))
+        conn.commit()
+        print(f"Deleted session with ID: {session_id}")
+    except sqlite3.Error as e:
+        print(f"Database Error in delete_session: {e}")
+    except Exception as e:
+        print(f"Unexpected Error in delete_session: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 
 # --- Helper Classes ---
 class EyeBoundary:
@@ -127,7 +146,7 @@ class FocusBar(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setMinimumHeight(20)
 
-    def set_timeline(self, timeline):
+    def setTimeline(self, timeline):
         self.timeline = timeline
         self.update() # Request repaint
 
@@ -166,10 +185,11 @@ class FocusBar(QWidget):
 class MainWindow(QMainWindow):
     """Main application window"""
     # Signals for thread-safe UI updates
-    update_status_signal = pyqtSignal(str, bool, bool)
-    show_stats_signal = pyqtSignal(str, list)
-    update_history_signal = pyqtSignal(list)
-    update_state_signal = pyqtSignal(int)
+    update_status_signal = pyqtSignal(str, bool, bool) # (status_text, is_focused, is_alerting)
+    show_stats_signal = pyqtSignal(str, list)          # (stats_text, timeline_list)
+    update_history_signal = pyqtSignal(list)           # (session_list)
+    update_state_signal = pyqtSignal(int)              # (new_state)
+    trigger_alert_signal = pyqtSignal()                # Signal for window alert
 
     def __init__(self):
         super().__init__()
@@ -185,6 +205,7 @@ class MainWindow(QMainWindow):
         self.eyeLeft_boundary = EyeBoundary()
         self.eyeRight_boundary = EyeBoundary()
         self.consecutive_unfocused_start = None
+        self.alert_sounded = False # Flag for audible/window alert
 
         init_db()
         self._setup_ui()
@@ -246,14 +267,21 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         """Connects UI element signals to slots"""
-        self.timer_edit.timeChanged.connect(self.time_changed)
+        self.timer_edit.timeChanged.connect(self.timeChanged)
         self.button.clicked.connect(self.press_button)
+        # Connect signals from tracking thread to main thread slots
         self.update_status_signal.connect(self.update_status_labels)
-        self.show_stats_signal.connect(self.call_stats_dialog)
+        self.show_stats_signal.connect(self.callStatsDialog)
         self.update_history_signal.connect(self.populate_history_list)
         self.update_state_signal.connect(self.set_state)
+        self.trigger_alert_signal.connect(self.handle_window_alert) # Connect new signal
 
-    def time_changed(self, qtime: QTime):
+    @pyqtSlot()
+    def handle_window_alert(self):
+        """Triggers the OS-specific window alert (e.g., taskbar flash)"""
+        QApplication.alert(self)
+
+    def timeChanged(self, qtime: QTime):
         if self.state == 0: self.study_time = qtime
 
     def load_and_display_history(self):
@@ -329,19 +357,19 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Error", f"Could not delete session: {e}")
 
     @pyqtSlot(str, list)
-    def call_stats_dialog(self, stats: str, timeline: list):
+    def callStatsDialog(self, stats: str, timeline: list):
         """Shows the post-session stats dialog"""
         dlg = QDialog(self)
         dlg.setWindowTitle("Session Statistics")
-        dlg_layout = QVBoxLayout()
-        dlg_label = QLabel(stats)
-        dlg_layout.addWidget(dlg_label)
+        dlgLayout = QVBoxLayout()
+        dlgLabel = QLabel(stats)
+        dlgLayout.addWidget(dlgLabel)
         focus_bar = FocusBar(timeline)
-        dlg_layout.addWidget(focus_bar)
-        dlg_button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
-        dlg_button_box.accepted.connect(dlg.accept)
-        dlg_layout.addWidget(dlg_button_box)
-        dlg.setLayout(dlg_layout)
+        dlgLayout.addWidget(focus_bar)
+        dlgButtonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        dlgButtonBox.accepted.connect(dlg.accept)
+        dlgLayout.addWidget(dlgButtonBox)
+        dlg.setLayout(dlgLayout)
         dlg.exec()
         self.load_and_display_history() # Refresh history after dialog
 
@@ -355,7 +383,7 @@ class MainWindow(QMainWindow):
     def set_state(self, new_state):
         """Updates the application state and triggers UI/thread changes"""
         if self.state == new_state: return # Avoid redundant state changes
-        print(f"Changing state from {self.state} to {new_state}")
+        previous_state = self.state
         self.state = new_state
 
         if new_state == 1: # Starting Calibration
@@ -415,9 +443,9 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str, bool, bool)
     def update_status_labels(self, status_text, is_focused, is_alerting):
         """Updates status labels via signals from the tracking thread"""
-        self.label2.setText(status_text)
+        self.label2.setText(status_text) # Always update label2
 
-        if self.state == 2:  # Only update focus status during session
+        if self.state == 2:  # Only update focus status label during session
             if is_alerting:
                 self.focus_status_label.setText("Status: Not Focusing!")
                 self.focus_status_label.setStyleSheet(
@@ -434,95 +462,114 @@ class MainWindow(QMainWindow):
     def tracking_loop(self):
         """Background thread loop for camera feed processing and tracking"""
         timeline = []
-        session_start_time = None
+        session_startTime = None
         last_sample_time = None
         session_running = False
 
         while self.state != 0: # Loop while not idle
-            status_msg = "" # Reset status message at the start of each iteration
+            try: # <<< Main try block for the loop iteration >>>
+                status_msg = "" # Reset status message at the start of each iteration
 
-            if not self.webcam or not self.webcam.isOpened():
-                status_msg = "Webcam error."
-                self.update_status_signal.emit(status_msg, False, False)
-                break
+                if not self.webcam or not self.webcam.isOpened():
+                    status_msg = "Webcam error."
+                    self.update_status_signal.emit(status_msg, False, False)
+                    break # Exit loop on webcam error
 
-            ret, frame = self.webcam.read()
-            if not ret:
-                status_msg = "Frame read error."
-                self.update_status_signal.emit(status_msg, False, False)
-                continue
+                ret, frame = self.webcam.read()
+                if not ret:
+                    status_msg = "Frame read error."
+                    self.update_status_signal.emit(status_msg, False, False)
+                    continue # Skip iteration on frame read error
 
-            try:
-                self.gaze.refresh(frame)
-                pupils_located = self.gaze.pupils_located
-                left_coords = self.gaze.pupil_left_coords()
-                right_coords = self.gaze.pupil_right_coords()
-            except Exception as e:
-                 print(f"Gaze tracking error: {e}")
-                 pupils_located = False
-                 left_coords = None
-                 right_coords = None
-                 status_msg = "Tracking Error" # Set status on error
+                # --- Inner try for gaze tracking specifically ---
+                try:
+                    self.gaze.refresh(frame)
+                    pupils_located = self.gaze.pupils_located
+                    left_coords = self.gaze.pupil_left_coords()
+                    right_coords = self.gaze.pupil_right_coords()
+                except Exception as e_gaze:
+                    print(f"Gaze tracking error: {e_gaze}")
+                    pupils_located = False
+                    left_coords = None
+                    right_coords = None
+                    status_msg = "Tracking Error" # Set status on gaze error
+                # --- End inner try ---
 
-            current_time = time()
-            is_focused = False
-            is_alerting = False
-            # status_msg is already reset, only set it if needed now
+                current_time = time()
+                is_focused = False
+                is_alerting = False
+                # status_msg is already reset, only set it if needed now
 
-            if self.state == 1: # Calibration phase
-                if not pupils_located:
-                    status_msg = "Warning: Pupil not detected"
-                if pupils_located:
-                    self.eyeLeft_boundary.adjust_coords(left_coords)
-                    self.eyeRight_boundary.adjust_coords(right_coords)
+                if self.state == 1: # Calibration phase
+                    if not pupils_located:
+                        status_msg = "Warning: Pupil not detected"
+                    if pupils_located:
+                        self.eyeLeft_boundary.adjust_coords(left_coords)
+                        self.eyeRight_boundary.adjust_coords(right_coords)
 
-            elif self.state == 2: # Session phase
-                if not session_running: # First loop iteration for the session
-                    session_start_time = current_time
-                    last_sample_time = session_start_time
-                    session_running = True
-                    timeline = []
-                    self.consecutive_unfocused_start = None
+                elif self.state == 2: # Session phase
+                    if not session_running: # First loop iteration for the session
+                        session_startTime = current_time
+                        last_sample_time = session_startTime
+                        session_running = True
+                        timeline = []
+                        self.consecutive_unfocused_start = None
+                        self.alert_sounded = False # Reset alert sound flag at session start
 
-                total_study_secs = QTime(0, 0, 0).secsTo(self.study_time)
-                elapsed_session_secs = current_time - session_start_time
+                    total_study_secs = QTime(0, 0, 0).secsTo(self.study_time)
+                    elapsed_session_secs = current_time - session_startTime
 
-                if pupils_located:
-                     left_outside = self.eyeLeft_boundary.check_coords(left_coords)
-                     right_outside = self.eyeRight_boundary.check_coords(right_coords)
-                     is_focused = not (left_outside and right_outside)
-                     # If pupils are located, ensure no warning is shown
-                     # status_msg remains "" unless set below
-                else:
-                    is_focused = False
-                    status_msg = "Warning: Pupil not detected" # Set warning if not located
+                    if pupils_located:
+                         left_outside = self.eyeLeft_boundary.check_coords(left_coords)
+                         right_outside = self.eyeRight_boundary.check_coords(right_coords)
+                         is_focused = not (left_outside and right_outside)
+                    else:
+                        is_focused = False
+                        status_msg = "Warning: Pupil not detected"
 
-                if not is_focused:
-                    if self.consecutive_unfocused_start is None:
-                        self.consecutive_unfocused_start = current_time
-                    elif current_time - self.consecutive_unfocused_start >= ALERT_THRESHOLD_SECONDS:
-                        is_alerting = True
-                else:
-                     self.consecutive_unfocused_start = None
+                    # Alert Logic
+                    if not is_focused:
+                        if self.consecutive_unfocused_start is None:
+                            self.consecutive_unfocused_start = current_time
+                            # Reset sound flag only when unfocused streak *starts*
+                            self.alert_sounded = False
+                        elif current_time - self.consecutive_unfocused_start >= ALERT_THRESHOLD_SECONDS:
+                            is_alerting = True
+                            if not self.alert_sounded:
+                                QApplication.beep() # Play system beep sound
+                                self.trigger_alert_signal.emit() # Emit signal for window alert
+                                self.alert_sounded = True # Mark alert as triggered for this streak
+                    else:
+                         self.consecutive_unfocused_start = None
+                         self.alert_sounded = False # Reset when focus is regained
 
-                if current_time - last_sample_time >= SAMPLE_INTERVAL_SECONDS:
-                    timeline.append(is_focused)
-                    last_sample_time = current_time
+                    # Sampling Logic
+                    if current_time - last_sample_time >= SAMPLE_INTERVAL_SECONDS:
+                        timeline.append(is_focused)
+                        last_sample_time = current_time
 
-                if elapsed_session_secs >= total_study_secs:
-                    self.finish_session(session_start_time, current_time, timeline)
-                    break # Exit loop -> thread finishes
+                    # Session End Logic
+                    if elapsed_session_secs >= total_study_secs:
+                        self.finish_session(session_startTime, current_time, timeline)
+                        break # Exit loop -> thread finishes
 
-            # Emit status updates for UI
-            self.update_status_signal.emit(status_msg, is_focused, is_alerting)
+                # Emit status updates for UI
+                self.update_status_signal.emit(status_msg, is_focused, is_alerting)
 
-            # Allow OpenCV processing time, remove if not displaying cv2 window
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                 break
+                # Allow OpenCV processing time
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                     break
+
+            except Exception as e_loop: # <<< Catch unexpected errors in the loop >>>
+                print(f"Unexpected error in tracking loop iteration: {e_loop}")
+                # Optionally add more handling, e.g., emit an error signal to UI
+                # break # Uncomment to stop tracking on unexpected errors
 
         # --- Cleanup after loop exit ---
+        # This part runs *after* the loop (or break)
         if session_running and self.state == 0: # Manual stop
-            self.finish_session(session_start_time, time(), timeline)
+            print("Loop finished, calling finish_session for manual stop.")
+            self.finish_session(session_startTime, time(), timeline) # Call cleanup
 
         # Signal state change back to idle just in case
         self.update_state_signal.emit(0)
@@ -530,24 +577,34 @@ class MainWindow(QMainWindow):
 
 
     def finish_session(self, start_time, end_time, timeline):
-        """Finalizes a session: calculates stats, saves, shows dialog"""
-        elapsed_secs = int(end_time - start_time)
-        total_samples = len(timeline)
-        focus_percentage = 0.0
-        if total_samples > 0:
-            focus_count = sum(1 for sample in timeline if sample)
-            focus_percentage = (focus_count / total_samples) * 100
+        """Finalizes a session: calculates stats, saves, shows dialog with error handling"""
+        try:
+            elapsed_secs = int(end_time - start_time)
+            total_samples = len(timeline)
+            focus_percentage = 0.0
+            if total_samples > 0:
+                focus_count = sum(1 for sample in timeline if sample)
+                focus_percentage = (focus_count / total_samples) * 100
 
-        save_session(start_time, end_time, focus_percentage, timeline)
+            # Avoid saving zero-duration sessions if stopped immediately
+            if elapsed_secs > 0:
+                save_session(start_time, end_time, focus_percentage, timeline)
+            else:
+                print("Session too short, not saving.")
 
-        minutes_elapsed = elapsed_secs // 60
-        seconds_rem = elapsed_secs % 60
-        stats = (
-            f"Session Finished\n\n"
-            f"Duration: {minutes_elapsed}m {seconds_rem}s\n"
-            f"Focus: {focus_percentage:.1f}%"
-        )
-        self.show_stats_signal.emit(stats, timeline) # Trigger dialog in main thread
+
+            minutes_elapsed = elapsed_secs // 60
+            seconds_rem = elapsed_secs % 60
+            stats = (
+                f"Session Finished\n\n"
+                f"Duration: {minutes_elapsed}m {seconds_rem}s\n"
+                f"Focus: {focus_percentage:.1f}%"
+            )
+            # Ensure signal emission happens even for short sessions to close dialog if open
+            self.show_stats_signal.emit(stats, timeline) # Trigger dialog in main thread
+        except Exception as e:
+            print(f"Error during finish_session: {e}")
+            # Optionally emit a signal here to inform the user via the UI
 
     def closeEvent(self, event):
         """Handles window close event for proper cleanup"""
