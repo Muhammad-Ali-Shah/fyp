@@ -596,6 +596,7 @@ class MainWindow(QMainWindow):
                 QPushButton:hover {{ background-color: #666666; }} QPushButton:pressed {{ background-color: #444444; }}
             """)
             copy_button.clicked.connect(lambda checked=False, sid=session_id: self.handle_copy_session_image(sid)) # Connect to image copy handler
+            buttons_layout.addWidget(copy_button)
 
             delete_button = QPushButton("-")
             delete_button.setFixedSize(25, 25)
