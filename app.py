@@ -126,7 +126,7 @@ class EyeBoundary:
         if not self.calibrated or coords is None: return True # Assume not focused if not calibrated or no coords
         x, y = coords
         if x is None or y is None: return True # Assume not focused if coords are invalid
-        tolerance = 5 # Optional buffer
+        tolerance = 5
         return (x < self.min_x - tolerance or x > self.max_x + tolerance or
                 y < self.min_y - tolerance or y > self.max_y + tolerance)
 
