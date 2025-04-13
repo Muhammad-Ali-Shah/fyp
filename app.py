@@ -683,7 +683,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", f"Could not copy session image: {e}")
     # --- End of Combined Image Copy Handler ---
 
-
     def handle_delete_session(self, session_id):
         """Confirms and deletes a session"""
         reply = QMessageBox.question(self, 'Confirm Deletion',
